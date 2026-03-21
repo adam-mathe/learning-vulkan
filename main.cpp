@@ -9,6 +9,10 @@
 #include <optional>
 #include <set>
 
+#include <cstdint>
+#include <limits>
+#include <algorithm>
+
 int main() {
     glfwInit();
 
@@ -95,6 +99,8 @@ int main() {
         std::vector<VkPresentModeKHR> present_modes;
     };
 
+    SwapChainSupportDetails swap_chain_details;
+
     for(const auto& device : devices) { //get a pointer to each device
         int i = 0;
 
@@ -152,9 +158,9 @@ int main() {
         //lastly we need to check if the swapchain is even compatible with our surface
         bool swapchain_surface_check = false;
 
-        SwapChainSupportDetails details;
+        SwapChainSupportDetails current_details;
 
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &current_details.capabilities);
 
         //query the formats the surface supports
         uint32_t format_count; 
@@ -162,8 +168,8 @@ int main() {
         vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, nullptr);
 
         if(format_count != 0) {
-            details.formats.resize(format_count);
-            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, details.formats.data());
+            current_details.formats.resize(format_count);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, current_details.formats.data());
         }
 
         //query the supported presentation modes
@@ -172,8 +178,8 @@ int main() {
         vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, nullptr);
         
         if(present_mode_count != 0) {
-            details.present_modes.resize(present_mode_count);
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, details.present_modes.data());
+            current_details.present_modes.resize(present_mode_count);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, current_details.present_modes.data());
         }
         
         //general check info for if the device is suitable
@@ -185,14 +191,15 @@ int main() {
 
         if(extensions_support) {
             //if the extensions are supported, then check if the surface is compatable with the swapchain
-            swapchain_surface_check = (!details.formats.empty() && !details.present_modes.empty());
+            swapchain_surface_check = (!current_details.formats.empty() && !current_details.present_modes.empty());
 
             if(swapchain_surface_check) {
                 if(device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && device_features.geometryShader) {
                     //this device has indices for both presenting and graphics
                     if(device_indices.graphics_family.has_value() && device_indices.present_family.has_value()) { 
                         physical_device = device; //set our physical device to this one
-                        indices = device_indices; //set our family queue indices to the indices of the current device
+                        indices = device_indices; //set our family queue indices to the indices of the current device  
+                        swap_chain_details = current_details;
                         break;
                     }
                 }
@@ -239,7 +246,7 @@ int main() {
 
     if(vkCreateDevice(physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS) {
         throw std::runtime_error("Couldn't create a logical device");
-    }   
+    }  
 
     VkQueue graphics_queue;
 
@@ -256,6 +263,73 @@ int main() {
     //Queue family A group of queues that only do one thing
     //Queue The queue where work gets done, drop stuff here for the GPU to execute
     //Surface items are delivered to the surface from the queue
+
+    //even if swap chain conditions are all met we need to determine the best settings
+    VkSurfaceFormatKHR surface_format = swap_chain_details.formats[0];
+    
+    for(const auto& available_format : swap_chain_details.formats) { //loop through available formats
+        if(available_format.format == VK_FORMAT_B8G8R8A8_SRGB && available_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            surface_format = available_format;
+            break;
+        }
+    }
+
+    //get the presentation mode
+    VkPresentModeKHR present_mode = swap_chain_details.present_modes[0];
+
+    for(const auto& available_present_mode : swap_chain_details.present_modes) {
+        if(available_present_mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+            present_mode = available_present_mode;
+            break;
+        }
+    }
+
+    //swap extent: the resolution of the swap chain images
+    VkExtent2D extent;
+
+        if(swap_chain_details.capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+            //if width is not the max possible value, the OS has decided how big the drawing surface will be, just use that.
+            extent = swap_chain_details.capabilities.currentExtent;
+        }
+    else {
+        //we need to determine it on our own
+        int width, height;
+
+        glfwGetFramebufferSize(window, &width, &height); //gives us the size of the window in pixels
+
+        VkExtent2D actual_extent = {
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height)
+        };
+
+        //clamp it so the resolution of the extent stays where the gpu can actually handle
+        actual_extent.width = std::clamp(actual_extent.width, swap_chain_details.capabilities.minImageExtent.width, swap_chain_details.capabilities.maxImageExtent.width);
+        actual_extent.height = std::clamp(actual_extent.height, swap_chain_details.capabilities.minImageExtent.height, swap_chain_details.capabilities.maxImageExtent.height);
+
+        extent = actual_extent;
+    }
+
+    //now we can create the swap chain
+
+    //how many images we want in the swap chain
+    uint32_t image_count = swap_chain_details.capabilities.maxImageCount + 1;
+
+    //we ensure we dont ask the gpu for more images than it is capable of handling
+    if(swap_chain_details.capabilities.maxImageCount > 0 && image_count > swap_chain_details.capabilities.maxImageCount) {
+        image_count = swap_chain_details.capabilities.maxImageCount;
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_create_info{};
+
+    swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchain_create_info.surface = surface;
+
+    swapchain_create_info.minImageCount = image_count;
+    swapchain_create_info.imageFormat = surface_format.format;
+    swapchain_create_info.imageColorSpace = surface_format.colorSpace;
+    swapchain_create_info.imageExtent = extent;
+    swapchain_create_info.imageArrayLayers = 1;
+    swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
