@@ -312,7 +312,7 @@ int main() {
     //now we can create the swap chain
 
     //how many images we want in the swap chain
-    uint32_t image_count = swap_chain_details.capabilities.maxImageCount + 1;
+    uint32_t image_count = swap_chain_details.capabilities.minImageCount + 1;
 
     //we ensure we dont ask the gpu for more images than it is capable of handling
     if(swap_chain_details.capabilities.maxImageCount > 0 && image_count > swap_chain_details.capabilities.maxImageCount) {
@@ -331,12 +331,87 @@ int main() {
     swapchain_create_info.imageArrayLayers = 1;
     swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
+    uint32_t queue_family_indices[] = {indices.graphics_family.value(), indices.present_family.value()};
+
+    if(indices.graphics_family != indices.present_family) {
+        swapchain_create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT; //images can be used across multiple queue families
+        swapchain_create_info.queueFamilyIndexCount = 2;
+        swapchain_create_info.pQueueFamilyIndices = queue_family_indices;
+    }
+    else {
+        swapchain_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; //an image is owned by one queue family at a time
+    }
+
+    swapchain_create_info.preTransform = swap_chain_details.capabilities.currentTransform; //we dont want any transformations on the image
+
+    swapchain_create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; //ignore the alpha
+
+    swapchain_create_info.presentMode = present_mode;
+    swapchain_create_info.clipped = VK_TRUE; //we dont care about pixels which are obscured
+
+    //its possible that the swapchain becomes invalid while the program, is running so we need a backup, ill do this later
+    swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
+
+    //now that we have the settings, make the swapchain
+    VkSwapchainKHR swapchain;
+
+    if(vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain) != VK_SUCCESS) {
+        throw std::runtime_error("Could not create Vulkan swapchain");
+    }
+
+    //now that its made lets get the handles of the VkImages inside
+    std::vector<VkImage> swapchain_images;
+
+    vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
+
+    swapchain_images.resize(image_count);
+
+    vkGetSwapchainImagesKHR(device, swapchain, &image_count, swapchain_images.data());
+
+    //to use any VkImage, we need an image view. this object describes how to access the VkImage and what part etc to use. we need one for each image
+    std::vector<VkImageView> swapchain_imageviews;
+
+    swapchain_imageviews.resize(swapchain_images.size());
+
+    for(size_t i = 0; i < swapchain_images.size(); ++i) {
+        VkImageViewCreateInfo imageview_create_info{};
+
+        imageview_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        imageview_create_info.image = swapchain_images[i]; //tell the view which image it is going to access
+
+        imageview_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D; //treat image as 1d, 2d, 3d, or a cube map etc.
+        imageview_create_info.format = surface_format.format; 
+
+        //stick to default mapping for RGBA
+        imageview_create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageview_create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageview_create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageview_create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+        imageview_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageview_create_info.subresourceRange.baseMipLevel = 0;
+        imageview_create_info.subresourceRange.levelCount = 1;
+        imageview_create_info.subresourceRange.baseArrayLayer = 0;
+        imageview_create_info.subresourceRange.layerCount = 1;
+
+        //now we can create the view
+        if(vkCreateImageView(device, &imageview_create_info, nullptr, &swapchain_imageviews[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image views");
+        }
+    }
+
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
     }
 
-    vkDestroySurfaceKHR(instance, surface, nullptr);
+    //destroy all the image views we created
+    for(auto image_view : swapchain_imageviews) {
+        vkDestroyImageView(device, image_view, nullptr);
+    }
+
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroyDevice(device, nullptr);
+    vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyInstance(instance, nullptr);
 
     glfwDestroyWindow(window);
