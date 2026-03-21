@@ -1,0 +1,1 @@
+g++ *.cpp -o test.exe -Iinclude -Llib -lglfw3dll -lvulkan-1
