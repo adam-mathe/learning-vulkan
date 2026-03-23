@@ -493,23 +493,6 @@ int main() {
     input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; //every 3 vertices is 1 triangle
     input_assembly.primitiveRestartEnable = VK_FALSE;
 
-    //we need these for drawing later
-    VkViewport viewport{};
-
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = (float) extent.width;
-    viewport.height = (float) extent.height;
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-
-    VkRect2D scissor{};
-
-    //we want the scissor rectangle to cover the entire framebuffer
-    scissor.offset = {0,0};
-    scissor.extent = extent;
-    //
-
     VkPipelineViewportStateCreateInfo viewport_state{};
 
     viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -675,11 +658,166 @@ int main() {
         throw std::runtime_error("Failed to create the command pool");
     }
     
-    
+    //now make the command buffer
+    VkCommandBuffer command_buffer;
+
+    VkCommandBufferAllocateInfo alloc_info{};
+
+    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.commandPool = command_pool;
+    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandBufferCount = 1;
+
+    if(vkAllocateCommandBuffers(device, &alloc_info, &command_buffer) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate command buffers");
+    }
+
+    //now we need to record the command buffer, we'll do it once here because the triangle is not moving
+    VkCommandBufferBeginInfo begin_info{};
+
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+    //Sync objects. make the cpu wait for the gpu to finish
+    VkSemaphore image_available_semaphore;
+    VkSemaphore render_finished_semaphore;
+    VkFence inflight_fence;
+
+    VkSemaphoreCreateInfo semaphore_info{};
+
+    semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    VkFenceCreateInfo fence_info{};
+
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    if(vkCreateSemaphore(device, &semaphore_info, nullptr, &image_available_semaphore) != VK_SUCCESS || vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphore) != VK_SUCCESS | vkCreateFence(device, &fence_info, nullptr, &inflight_fence) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create semaphores");
+    }
+
+
 
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        //draw the frame
+        vkWaitForFences(device, 1, &inflight_fence, VK_TRUE, UINT64_MAX);
+
+        vkResetFences(device, 1, &inflight_fence);
+
+        //now we need to acquire an image from the swap chain
+        uint32_t image_index;
+
+        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_available_semaphore, VK_NULL_HANDLE, &image_index);
+
+        vkResetCommandBuffer(command_buffer, 0);
+
+        //record command buffer
+        //in this command buffer we are going to tell the gpu to:
+        //start the render pass, bind the pipeline, draw, and then end the render pass
+        if(vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to begin recording command buffer");
+        }
+
+        VkRenderPassBeginInfo render_pass_begin_info{};
+
+        render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        render_pass_begin_info.renderPass = render_pass;
+        render_pass_begin_info.framebuffer = swapchain_frame_buffers[image_index]; //change the 0 later
+        render_pass_begin_info.renderArea.offset = {0,0};
+        render_pass_begin_info.renderArea.extent = extent;
+
+        VkClearValue clear_color = {{0.2f, 0.2f, 0.2f, 1.0f}};
+
+        render_pass_begin_info.clearValueCount = 1;
+        render_pass_begin_info.pClearValues = &clear_color;
+
+        vkCmdBeginRenderPass(command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+        //bind the graphics pipeline
+        vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+
+        //we left viewport and scissor dynamic so:
+        VkViewport viewport{};
+
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float) extent.width;
+        viewport.height = (float) extent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+
+        //we want the scissor rectangle to cover the entire framebuffer
+        scissor.offset = {0,0};
+        scissor.extent = extent;
+
+        vkCmdSetScissor(command_buffer, 0, 1, &scissor);   
+
+        vkCmdDraw(command_buffer, 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(command_buffer);
+
+        if(vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to record command buffer");
+        }
+
+        //now we need to submit the command buffer
+        VkSubmitInfo submit_info{};
+
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        VkSemaphore wait_semaphores[] = { image_available_semaphore };
+        VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = wait_semaphores;
+        submit_info.pWaitDstStageMask = wait_stages;
+
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &command_buffer;
+
+        VkSemaphore signal_semaphores[] = { render_finished_semaphore };
+
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = signal_semaphores;
+
+        if(vkQueueSubmit(graphics_queue, 1, &submit_info, inflight_fence) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to submit draw command buffer");
+        }
+
+        VkSubpassDependency dependency{};
+
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies = &dependency;
+
+        //submit the result back to the swapchain
+        VkPresentInfoKHR present_info{};
+
+        present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &swapchain;
+        present_info.pImageIndices = &image_index;
+
+        present_info.pResults = nullptr;
+
+        vkQueuePresentKHR(graphics_queue, &present_info);
     }
+
+    //destroy semaphores
 
     vkDestroyCommandPool(device, command_pool, nullptr);
 
